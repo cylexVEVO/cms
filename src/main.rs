@@ -110,8 +110,8 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
             panic!("duplicate field slug");
         }
 
-        seen_names.insert(field.name.clone());
-        seen_slugs.insert(field.slug.clone());
+        seen_names.insert(&field.name);
+        seen_slugs.insert(&field.slug);
     }
 
     let model = Model {
@@ -122,7 +122,7 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
     };
 
     let coll = db.collection::<Model>("models");
-    coll.insert_one(model.clone(), None).await.unwrap();
+    coll.insert_one(&model, None).await.unwrap();
 
     Json(model)
 }
@@ -207,7 +207,7 @@ async fn create_entry(
     };
 
     let coll = db.collection::<Entry>("entries");
-    coll.insert_one(entry.clone(), None).await.unwrap();
+    coll.insert_one(&entry, None).await.unwrap();
 
     Json(entry)
 }
@@ -235,7 +235,7 @@ async fn list_entries(
             let coll = db.collection::<Entry>("entries");
             let entries = coll
                 .find(
-                    doc! { "_id": ObjectId::parse_str(query.id.clone()).unwrap() },
+                    doc! { "_id": ObjectId::parse_str(&query.id).unwrap() },
                     None,
                 )
                 .await
