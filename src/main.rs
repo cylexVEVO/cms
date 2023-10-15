@@ -6,8 +6,8 @@ use axum::{
 use chrono::DateTime;
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, oid::ObjectId},
-    options::IndexOptions,
+    bson::{doc, oid::ObjectId, Document},
+    options::{IndexOptions, FindOptions},
     Client, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,17 @@ async fn create_entry(
 
     let mut fields = HashMap::new();
 
+    // ensure entry has the same fields as model
+    let mut model_fields: Vec<&String> = model.fields.iter().map(|f| &f.slug).collect();
+    let mut entry_fields: Vec<&String> = input.fields.iter().map(|f| f.0).collect();
+    
+    model_fields.sort();
+    entry_fields.sort();
+    
+    if model_fields != entry_fields {
+        panic!("entry fields must match model fields");
+    }
+
     for (name, value) in input.fields {
         let model_field = model.fields.iter().find(|f| f.slug == name).unwrap();
         let mut value = value;
@@ -214,7 +225,8 @@ async fn create_entry(
 
 #[derive(Deserialize, Debug)]
 struct ListEntries {
-    id: String,
+    id: Option<String>,
+    select: Option<String>,
 }
 
 async fn list_entries(
@@ -229,11 +241,17 @@ async fn list_entries(
         .unwrap()
         .unwrap();
 
-    let filter = match query {
+    let filter = match &query {
         Some(query) => {
-            doc! {
-                "_id": ObjectId::parse_str(&query.id).unwrap()
+            let mut filter = Document::new();
+            
+            if let Some(id) = &query.id {
+                let ids: Vec<ObjectId> = id.split(',').map(|id| ObjectId::parse_str(id).unwrap()).collect();
+
+                filter.insert("_id", doc! { "$in": ids });
             }
+            
+            filter
         }
         None => {
             doc! {
@@ -242,9 +260,33 @@ async fn list_entries(
         }
     };
 
+    let options = match &query {
+        Some(query) => {
+            let mut projection = Document::new();
+            
+            if let Some(select) = &query.select {
+                select.split(',').for_each(|field| {
+                    // make sure field is in model
+                    if model.fields.iter().find(|f| f.slug == field).is_none() {
+                        panic!("field not in model");
+                    }
+                    
+                    projection.insert(format!("fields.{}", field), 1);
+                });
+            }
+            
+            projection.insert("model_id", 1);
+            
+            Some(FindOptions::builder().projection(projection).build())
+        }
+        None => {
+            None
+        }
+    };
+
     let coll = db.collection::<Entry>("entries");
     let entries = coll
-        .find(filter, None)
+        .find(filter, options)
         .await
         .unwrap()
         .try_collect()

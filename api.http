@@ -1,0 +1,54 @@
+### Create model
+POST http://localhost:3000/models
+content-type: application/json
+
+{
+    "name": "Test Model",
+    "slug": "test_model",
+    "fields": [
+        {
+            "name": "Test Field",
+            "slug": "test_field",
+            "kind": "Text"
+        }
+    ]
+}
+
+### List models
+GET http://localhost:3000/models
+
+### Show model
+GET http://localhost:3000/models/blog_post
+
+### Create entry
+POST http://localhost:3000/models/blog_post/entries
+content-type: application/json
+
+{
+    "fields": {
+        "post_title": {
+            "Text": "test"
+        },
+        "post_date": {
+            "DateTime": "2023-10-15T17:32:49.35Z"
+        },
+        "post_body": {
+            "Text": "body"
+        },
+        "test_field": {
+            "Number": 69420
+        }
+    }
+}
+
+### List entries
+GET http://localhost:3000/models/blog_post/entries
+
+### Get entry by id
+GET http://localhost:3000/models/test_model/entries?id=652bf6bcf61ceea261b62b31
+
+### Get serveral entries by id
+GET http://localhost:3000/models/test_model/entries?id=652bf6bcf61ceea261b62b31,652c1a4153b4cca62488ada5
+
+### Get entry by id with selection
+GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c&select=post_date
