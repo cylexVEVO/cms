@@ -222,50 +222,36 @@ async fn list_entries(
     Path(slug): Path<String>,
     query: Option<Query<ListEntries>>,
 ) -> Json<Vec<Entry>> {
-    // if no query params, list all entries
-    match query {
+    let coll = db.collection::<Model>("models");
+    let model = coll
+        .find_one(doc! { "slug": slug }, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let filter = match query {
         Some(query) => {
-            let coll = db.collection::<Model>("models");
-            _ = coll
-                .find_one(doc! { "slug": slug }, None)
-                .await
-                .unwrap()
-                .unwrap();
-
-            let coll = db.collection::<Entry>("entries");
-            let entries = coll
-                .find(
-                    doc! { "_id": ObjectId::parse_str(&query.id).unwrap() },
-                    None,
-                )
-                .await
-                .unwrap()
-                .try_collect()
-                .await
-                .unwrap();
-
-            Json(entries)
+            doc! {
+                "_id": ObjectId::parse_str(&query.id).unwrap()
+            }
         }
         None => {
-            let coll = db.collection::<Model>("models");
-            let model = coll
-                .find_one(doc! { "slug": slug }, None)
-                .await
-                .unwrap()
-                .unwrap();
-
-            let coll = db.collection::<Entry>("entries");
-            let entries = coll
-                .find(doc! { "model_id": model._id }, None)
-                .await
-                .unwrap()
-                .try_collect()
-                .await
-                .unwrap();
-
-            Json(entries)
+            doc! {
+                "model_id": model._id
+            }
         }
-    }
+    };
+
+    let coll = db.collection::<Entry>("entries");
+    let entries = coll
+        .find(filter, None)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+
+    Json(entries)
 }
 
 // TODO: update entries
