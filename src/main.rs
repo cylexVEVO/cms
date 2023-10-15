@@ -3,9 +3,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::DateTime;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, oid::ObjectId},
+    options::IndexOptions,
     Client, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,7 @@ async fn main() {
                 .keys(doc! {
                     "slug": 1
                 })
+                .options(IndexOptions::builder().unique(true).build())
                 .build(),
             None,
         )
@@ -68,6 +71,8 @@ struct ModelField {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum ModelFieldType {
     Text,
+    Number,
+    DateTime,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -80,6 +85,8 @@ struct Entry {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum EntryField {
     Text(String),
+    Number(i64),
+    DateTime(String),
 }
 
 #[derive(Deserialize, Debug)]
@@ -166,11 +173,26 @@ async fn create_entry(
 
     for (name, value) in input.fields {
         let model_field = model.fields.iter().find(|f| f.slug == name).unwrap();
+        let mut value = value;
 
         // ensure field kind matches definition
         match value {
             EntryField::Text(_) => match model_field.kind {
                 ModelFieldType::Text => {}
+                _ => panic!("invalid field value"),
+            },
+            EntryField::Number(_) => match model_field.kind {
+                ModelFieldType::Number => {}
+                _ => panic!("invalid field value"),
+            },
+            EntryField::DateTime(date) => match model_field.kind {
+                ModelFieldType::DateTime => {
+                    // ensure date is valid
+                    match DateTime::parse_from_rfc3339(&date) {
+                        Ok(date) => value = EntryField::DateTime(date.to_rfc3339()),
+                        Err(_) => panic!("invalid field value"),
+                    }
+                }
                 _ => panic!("invalid field value"),
             },
         }
@@ -204,7 +226,7 @@ async fn list_entries(
     match query {
         Some(query) => {
             let coll = db.collection::<Model>("models");
-            let model = coll
+            _ = coll
                 .find_one(doc! { "slug": slug }, None)
                 .await
                 .unwrap()
