@@ -66,6 +66,7 @@ struct ModelField {
     name: String,
     slug: String,
     kind: ModelFieldType,
+    options: Option<ModelFieldOptions>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -75,6 +76,18 @@ enum ModelFieldType {
     DateTime,
     Boolean,
     Enum(Vec<String>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+enum ModelFieldOptions {
+    Text {
+        min_length: Option<u64>,
+        max_length: Option<u64>,
+    },
+    Number {
+        min: Option<i64>,
+        max: Option<i64>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -112,6 +125,34 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
 
         if seen_slugs.contains(&field.slug) {
             panic!("duplicate field slug");
+        }
+
+        // validate field options
+        match (&field.options, &field.kind) {
+            (
+                Some(ModelFieldOptions::Text {
+                    min_length,
+                    max_length,
+                }),
+                &ModelFieldType::Text,
+            ) => {
+                // make sure max length is not less than min, and vice versa
+                if let (Some(min_length), Some(max_length)) = (min_length, max_length) {
+                    if min_length > max_length {
+                        panic!("min_length must be less than max_length");
+                    }
+                }
+            }
+            (Some(ModelFieldOptions::Number { min, max }), &ModelFieldType::Number) => {
+                // make sure max length is not less than min, and vice versa
+                if let (Some(min), Some(max)) = (min, max) {
+                    if min > max {
+                        panic!("min must be less than max");
+                    }
+                }
+            }
+            (None, _) => {}
+            _ => panic!("invalid field options"),
         }
 
         seen_names.insert(&field.name);
@@ -191,38 +232,62 @@ async fn create_entry(
         let mut value = value;
 
         // ensure field kind matches definition
-        match value {
-            EntryField::Text(_) => match model_field.kind {
-                ModelFieldType::Text => {}
-                _ => panic!("invalid field value"),
-            },
-            EntryField::Number(_) => match model_field.kind {
-                ModelFieldType::Number => {}
-                _ => panic!("invalid field value"),
-            },
-            EntryField::DateTime(date) => match model_field.kind {
-                ModelFieldType::DateTime => {
-                    // ensure date is valid
-                    match DateTime::parse_from_rfc3339(&date) {
-                        Ok(date) => value = EntryField::DateTime(date.to_rfc3339()),
-                        Err(_) => panic!("invalid field value"),
+        match (&value, &model_field.kind) {
+            (EntryField::Text(text), ModelFieldType::Text) => {
+                // validate field value against field options
+                match &model_field.options {
+                    Some(ModelFieldOptions::Text {
+                        min_length,
+                        max_length,
+                    }) => {
+                        if let Some(min_length) = min_length {
+                            if &(text.len() as u64) < min_length {
+                                panic!("value is too short");
+                            }
+                        }
+
+                        if let Some(max_length) = max_length {
+                            if &(text.len() as u64) > max_length {
+                                panic!("value is too long");
+                            }
+                        }
+                    }
+                    None => {}
+                    _ => panic!("invalid field options"),
+                }
+            }
+            (EntryField::Number(value), ModelFieldType::Number) => match &model_field.options {
+                Some(ModelFieldOptions::Number { min, max }) => {
+                    if let Some(min) = min {
+                        if value < min {
+                            panic!("value is too small");
+                        }
+                    }
+
+                    if let Some(max) = max {
+                        if value > max {
+                            panic!("value is too large");
+                        }
                     }
                 }
-                _ => panic!("invalid field value"),
+                None => {}
+                _ => panic!("invalid field options"),
             },
-            EntryField::Boolean(_) => match model_field.kind {
-                ModelFieldType::Boolean => {}
-                _ => panic!("invalid field value"),
-            },
-            EntryField::Enum(ref variant) => match &model_field.kind {
-                ModelFieldType::Enum(enum_variants) => {
-                    // ensure specified variant is part of ennum
-                    if !enum_variants.contains(variant) {
-                        panic!("invalid field value");
-                    }
+            (EntryField::DateTime(date), ModelFieldType::DateTime) => {
+                // ensure date is valid
+                match DateTime::parse_from_rfc3339(&date) {
+                    Ok(date) => value = EntryField::DateTime(date.to_rfc3339()),
+                    Err(_) => panic!("invalid field value"),
                 }
-                _ => panic!("invalid field value"),
-            },
+            }
+            (EntryField::Boolean(_), ModelFieldType::Boolean) => {}
+            (EntryField::Enum(variant), ModelFieldType::Enum(enum_variants)) => {
+                // ensure specified variant is part of enum
+                if !enum_variants.contains(variant) {
+                    panic!("invalid field value");
+                }
+            }
+            _ => panic!("invalid field value"),
         }
 
         fields.insert(name, value);
