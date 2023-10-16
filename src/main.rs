@@ -93,8 +93,8 @@ enum ModelFieldOptions {
         not_after: Option<String>,
     },
     Enum {
-        allow_multiple: Option<bool>
-    }
+        allow_multiple: Option<bool>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -191,15 +191,18 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
                     }
                 }
             }
-            (Some(ModelFieldOptions::Enum { allow_multiple: _ }), &ModelFieldType::Enum(ref variants)) => {
+            (
+                Some(ModelFieldOptions::Enum { allow_multiple: _ }),
+                &ModelFieldType::Enum(ref variants),
+            ) => {
                 // ensure all variants are unique
                 let mut seen_variants = HashSet::new();
-                
+
                 for variant in variants {
                     if seen_variants.contains(variant) {
                         panic!("duplicate enum variant");
                     }
-                    
+
                     seen_variants.insert(variant);
                 }
             }
@@ -378,7 +381,7 @@ async fn create_entry(
                     }
                     _ => panic!("invalid field options"),
                 }
-                
+
                 // ensure specified variants are part of enum
                 if !selected_variants.iter().all(|f| enum_variants.contains(f)) {
                     panic!("invalid field value");
@@ -386,12 +389,12 @@ async fn create_entry(
 
                 // ensure all selected variants are unique
                 let mut seen_variants = HashSet::new();
-                
+
                 for variant in selected_variants {
                     if seen_variants.contains(variant) {
                         panic!("duplicate enum variant");
                     }
-                    
+
                     seen_variants.insert(variant);
                 }
             }

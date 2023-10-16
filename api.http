@@ -3,13 +3,68 @@ POST http://localhost:3000/models
 content-type: application/json
 
 {
-    "name": "Test Model",
-    "slug": "test_model",
+    "name": "Blog Post",
+    "slug": "blog_post",
     "fields": [
         {
-            "name": "Test Field",
-            "slug": "test_field",
+            "name": "Title",
+            "slug": "title",
+            "kind": "Text",
+            "options": {
+                "Text": {
+                    "min_length": 1,
+                    "max_length": 50
+                }
+            }
+        },
+        {
+            "name": "Date",
+            "slug": "date",
+            "kind": "DateTime",
+            "options": {
+                "DateTime": {
+                    "not_before": "2020-01-01T00:00:00.00Z",
+                    "not_after": "2030-01-01T00:00:00.00Z"
+                }
+            }
+        },
+        {
+            "name": "Body",
+            "slug": "body",
             "kind": "Text"
+        },
+        {
+            "name": "Draft?",
+            "slug": "draft",
+            "kind": "Boolean"
+        },
+        {
+            "name": "Tags",
+            "slug": "tags",
+            "kind": {
+                "Enum": [
+                    "product",
+                    "engineering",
+                    "culture",
+                    "marketing"
+                ]
+            },
+            "options": {
+                "Enum": {
+                    "allow_multiple": true
+                }
+            }
+        },
+        {
+            "name": "Number Field",
+            "slug": "number",
+            "kind": "Number",
+            "options": {
+                "Number": {
+                    "min": 1,
+                    "max": 69420
+                }
+            }
         }
     ]
 }
@@ -26,17 +81,26 @@ content-type: application/json
 
 {
     "fields": {
-        "post_title": {
-            "Text": "test"
+        "title": {
+            "Text": "Simply the best CMS, hugely amazing."
         },
-        "post_date": {
-            "DateTime": "2023-10-15T17:32:49.35Z"
+        "date": {
+            "DateTime": "2023-10-16T12:00:00.00Z"
         },
-        "post_body": {
-            "Text": "body"
+        "body": {
+            "Text": "It's written in Rust so it must be good!"
         },
-        "test_field": {
-            "Number": 69420
+        "draft": {
+            "Boolean": false
+        },
+        "tags": {
+            "Enum": [
+                "product",
+                "engineering"
+            ]
+        },
+        "number": {
+            "Number": 42
         }
     }
 }
@@ -45,10 +109,10 @@ content-type: application/json
 GET http://localhost:3000/models/blog_post/entries
 
 ### Get entry by id
-GET http://localhost:3000/models/test_model/entries?id=652bf6bcf61ceea261b62b31
+GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c
 
 ### Get serveral entries by id
-GET http://localhost:3000/models/test_model/entries?id=652bf6bcf61ceea261b62b31,652c1a4153b4cca62488ada5
+GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c,652c1a4153b4cca62488ada5
 
 ### Get entry by id with selection
-GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c&select=post_date
+GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c&select=title,date,tags
