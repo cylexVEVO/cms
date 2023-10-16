@@ -7,7 +7,7 @@ use chrono::DateTime;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, oid::ObjectId, Document},
-    options::{IndexOptions, FindOptions},
+    options::{FindOptions, IndexOptions},
     Client, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,8 @@ enum ModelFieldType {
     Text,
     Number,
     DateTime,
+    Boolean,
+    Enum(Vec<String>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -87,6 +89,8 @@ enum EntryField {
     Text(String),
     Number(i64),
     DateTime(String),
+    Boolean(bool),
+    Enum(String),
 }
 
 #[derive(Deserialize, Debug)]
@@ -174,10 +178,10 @@ async fn create_entry(
     // ensure entry has the same fields as model
     let mut model_fields: Vec<&String> = model.fields.iter().map(|f| &f.slug).collect();
     let mut entry_fields: Vec<&String> = input.fields.iter().map(|f| f.0).collect();
-    
+
     model_fields.sort();
     entry_fields.sort();
-    
+
     if model_fields != entry_fields {
         panic!("entry fields must match model fields");
     }
@@ -202,6 +206,19 @@ async fn create_entry(
                     match DateTime::parse_from_rfc3339(&date) {
                         Ok(date) => value = EntryField::DateTime(date.to_rfc3339()),
                         Err(_) => panic!("invalid field value"),
+                    }
+                }
+                _ => panic!("invalid field value"),
+            },
+            EntryField::Boolean(_) => match model_field.kind {
+                ModelFieldType::Boolean => {}
+                _ => panic!("invalid field value"),
+            },
+            EntryField::Enum(ref variant) => match &model_field.kind {
+                ModelFieldType::Enum(enum_variants) => {
+                    // ensure specified variant is part of ennum
+                    if !enum_variants.contains(variant) {
+                        panic!("invalid field value");
                     }
                 }
                 _ => panic!("invalid field value"),
@@ -244,13 +261,16 @@ async fn list_entries(
     let filter = match &query {
         Some(query) => {
             let mut filter = Document::new();
-            
+
             if let Some(id) = &query.id {
-                let ids: Vec<ObjectId> = id.split(',').map(|id| ObjectId::parse_str(id).unwrap()).collect();
+                let ids: Vec<ObjectId> = id
+                    .split(',')
+                    .map(|id| ObjectId::parse_str(id).unwrap())
+                    .collect();
 
                 filter.insert("_id", doc! { "$in": ids });
             }
-            
+
             filter
         }
         None => {
@@ -263,25 +283,23 @@ async fn list_entries(
     let options = match &query {
         Some(query) => {
             let mut projection = Document::new();
-            
+
             if let Some(select) = &query.select {
                 select.split(',').for_each(|field| {
                     // make sure field is in model
                     if model.fields.iter().find(|f| f.slug == field).is_none() {
                         panic!("field not in model");
                     }
-                    
+
                     projection.insert(format!("fields.{}", field), 1);
                 });
+
+                projection.insert("model_id", 1);
             }
-            
-            projection.insert("model_id", 1);
-            
+
             Some(FindOptions::builder().projection(projection).build())
         }
-        None => {
-            None
-        }
+        None => None,
     };
 
     let coll = db.collection::<Entry>("entries");
