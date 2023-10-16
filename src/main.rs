@@ -88,6 +88,10 @@ enum ModelFieldOptions {
         min: Option<i64>,
         max: Option<i64>,
     },
+    DateTime {
+        not_before: Option<String>,
+        not_after: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -148,6 +152,39 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
                 if let (Some(min), Some(max)) = (min, max) {
                     if min > max {
                         panic!("min must be less than max");
+                    }
+                }
+            }
+            (
+                Some(ModelFieldOptions::DateTime {
+                    not_before,
+                    not_after,
+                }),
+                &ModelFieldType::DateTime,
+            ) => {
+                // validate dates
+                if let Some(not_before) = not_before {
+                    match DateTime::parse_from_rfc3339(&not_before) {
+                        Ok(_) => {}
+                        Err(_) => panic!("invalid field value"),
+                    }
+                }
+
+                if let Some(not_after) = not_after {
+                    match DateTime::parse_from_rfc3339(&not_after) {
+                        Ok(_) => {}
+                        Err(_) => panic!("invalid field value"),
+                    }
+                }
+
+                if let (Some(not_before), Some(not_after)) = (not_before, not_after) {
+                    let (not_before, not_after) = (
+                        DateTime::parse_from_rfc3339(&not_before).unwrap(),
+                        DateTime::parse_from_rfc3339(&not_after).unwrap(),
+                    );
+
+                    if not_before > not_after {
+                        panic!("not_before must be before not_after");
                     }
                 }
             }
@@ -276,7 +313,36 @@ async fn create_entry(
             (EntryField::DateTime(date), ModelFieldType::DateTime) => {
                 // ensure date is valid
                 match DateTime::parse_from_rfc3339(&date) {
-                    Ok(date) => value = EntryField::DateTime(date.to_rfc3339()),
+                    Ok(date) => {
+                        match &model_field.options {
+                            Some(ModelFieldOptions::DateTime {
+                                not_before,
+                                not_after,
+                            }) => {
+                                if let Some(not_before) = not_before {
+                                    let not_before =
+                                        DateTime::parse_from_rfc3339(&not_before).unwrap();
+
+                                    if date < not_before {
+                                        panic!("date is before not_before");
+                                    }
+                                }
+
+                                if let Some(not_after) = not_after {
+                                    let not_after =
+                                        DateTime::parse_from_rfc3339(&not_after).unwrap();
+
+                                    if date > not_after {
+                                        panic!("date is after not_after");
+                                    }
+                                }
+                            }
+                            None => {}
+                            _ => panic!("invalid field options"),
+                        }
+
+                        value = EntryField::DateTime(date.to_rfc3339())
+                    }
                     Err(_) => panic!("invalid field value"),
                 }
             }
