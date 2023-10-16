@@ -92,6 +92,9 @@ enum ModelFieldOptions {
         not_before: Option<String>,
         not_after: Option<String>,
     },
+    Enum {
+        allow_multiple: Option<bool>
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -107,7 +110,7 @@ enum EntryField {
     Number(i64),
     DateTime(String),
     Boolean(bool),
-    Enum(String),
+    Enum(Vec<String>),
 }
 
 #[derive(Deserialize, Debug)]
@@ -186,6 +189,18 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
                     if not_before > not_after {
                         panic!("not_before must be before not_after");
                     }
+                }
+            }
+            (Some(ModelFieldOptions::Enum { allow_multiple: _ }), &ModelFieldType::Enum(ref variants)) => {
+                // ensure all variants are unique
+                let mut seen_variants = HashSet::new();
+                
+                for variant in variants {
+                    if seen_variants.contains(variant) {
+                        panic!("duplicate enum variant");
+                    }
+                    
+                    seen_variants.insert(variant);
                 }
             }
             (None, _) => {}
@@ -347,10 +362,37 @@ async fn create_entry(
                 }
             }
             (EntryField::Boolean(_), ModelFieldType::Boolean) => {}
-            (EntryField::Enum(variant), ModelFieldType::Enum(enum_variants)) => {
-                // ensure specified variant is part of enum
-                if !enum_variants.contains(variant) {
+            (EntryField::Enum(selected_variants), ModelFieldType::Enum(enum_variants)) => {
+                // ensure selection count is valid with enum options
+                match &model_field.options {
+                    Some(ModelFieldOptions::Enum { allow_multiple }) => {
+                        if !allow_multiple.unwrap_or(false) && selected_variants.len() > 1 {
+                            panic!("too many selected variants");
+                        }
+                    }
+                    None => {
+                        // no `options` on an enum is the same as `allow_multiple` being `false`
+                        if selected_variants.len() > 1 {
+                            panic!("too many selected variants");
+                        }
+                    }
+                    _ => panic!("invalid field options"),
+                }
+                
+                // ensure specified variants are part of enum
+                if !selected_variants.iter().all(|f| enum_variants.contains(f)) {
                     panic!("invalid field value");
+                }
+
+                // ensure all selected variants are unique
+                let mut seen_variants = HashSet::new();
+                
+                for variant in selected_variants {
+                    if seen_variants.contains(variant) {
+                        panic!("duplicate enum variant");
+                    }
+                    
+                    seen_variants.insert(variant);
                 }
             }
             _ => panic!("invalid field value"),
