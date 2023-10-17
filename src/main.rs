@@ -1,25 +1,150 @@
 use axum::{
     extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
 };
 use chrono::DateTime;
+use clap::{Parser, Subcommand};
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, oid::ObjectId, Document},
+    bson::{doc, oid::ObjectId, Binary, Bson, Document},
     options::{FindOptions, IndexOptions},
-    Client, Database, IndexModel,
+    Client, Collection, Database, IndexModel,
 };
+use rand::{
+    distributions::{Alphanumeric, DistString},
+    rngs::OsRng,
+};
+use ring::hmac::{self, Key};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    fs::File,
+    io::{self, Read, Write},
     net::SocketAddr,
 };
+use thiserror::Error;
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    GenerateApiKey {
+        #[arg(short, long)]
+        perms: Vec<ApiKeyPermission>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum ApiKeyPermission {
+    Create,
+    Read,
+}
+
+impl From<String> for ApiKeyPermission {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "create" => Self::Create,
+            "read" => Self::Read,
+            _ => panic!("invalid permission"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ApiKey {
+    _id: ObjectId,
+    key: Bson,
+    perms: Vec<ApiKeyPermission>,
+}
+
+#[derive(Error, Debug)]
+enum Error {
+    #[error("io error")]
+    IoError(#[from] io::Error),
+    #[error("ring error")]
+    RingError,
+    #[error("auth required")]
+    AuthRequired,
+}
+
+impl Into<StatusCode> for Error {
+    fn into(self) -> StatusCode {
+        match self {
+            Self::AuthRequired => StatusCode::UNAUTHORIZED,
+            Self::IoError(_) | Self::RingError => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+fn get_signing_key() -> Result<Key, Error> {
+    fn gen_and_save_key() -> Result<Key, Error> {
+        let mut file = File::create("./cms-aksk.key")?;
+        let rng = ring::rand::SystemRandom::new();
+        let key_value: [u8; ring::digest::SHA256_OUTPUT_LEN] = match ring::rand::generate(&rng) {
+            Ok(key_value) => key_value.expose(),
+            Err(_) => return Err(Error::RingError),
+        };
+        file.write_all(&key_value)?;
+
+        Ok(hmac::Key::new(hmac::HMAC_SHA256, &key_value))
+    }
+
+    match File::open("./cms-aksk.key") {
+        Ok(mut file) => {
+            let mut buf = vec![0; ring::digest::SHA256_OUTPUT_LEN];
+            match file.read_exact(&mut buf) {
+                Ok(_) => Ok(hmac::Key::new(hmac::HMAC_SHA256, &buf)),
+                Err(_) => gen_and_save_key(),
+            }
+        }
+        Err(_) => gen_and_save_key(),
+    }
+}
+
+async fn verify_api_key(
+    coll: &Collection<ApiKey>,
+    required_perms: Vec<ApiKeyPermission>,
+    api_key: &String,
+) -> Result<bool, Error> {
+    let signed_key = hmac::sign(&get_signing_key()?, api_key.as_bytes());
+    Ok(match coll.find_one(doc! { "key": Bson::Binary(Binary { bytes: signed_key.as_ref().to_vec(), subtype: mongodb::bson::spec::BinarySubtype::Generic }) }, None)
+        .await
+        .unwrap() {
+            Some(found_key) => {
+                required_perms.iter().all(|p| found_key.perms.contains(p))
+            },
+            None => false
+        })
+}
+
+async fn verify_api_key_header(
+    db: &Database,
+    headers: &HeaderMap,
+    required_perms: Vec<ApiKeyPermission>,
+) -> Result<bool, Error> {
+    Ok(match headers.get("api-key") {
+        Some(api_key) => {
+            let coll = db.collection::<ApiKey>("api_keys");
+            verify_api_key(
+                &coll,
+                required_perms,
+                &api_key.to_str().unwrap().to_string(),
+            )
+            .await?
+        }
+        None => false,
+    })
+}
 
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().unwrap();
-
     let client = Client::with_uri_str(std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
@@ -36,6 +161,44 @@ async fn main() {
         )
         .await
         .unwrap();
+    db.collection::<Model>("api_keys")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "key": 1
+                })
+                .build(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let args = Args::parse();
+
+    match args.command {
+        Some(Command::GenerateApiKey { perms }) => {
+            let api_key_string = Alphanumeric.sample_string(&mut OsRng, 48);
+            let key = get_signing_key().expect("failed to get signing key");
+            let signed_key = hmac::sign(&key, api_key_string.as_bytes());
+
+            let api_key = ApiKey {
+                _id: ObjectId::new(),
+                key: Bson::Binary(Binary {
+                    bytes: signed_key.as_ref().to_vec(),
+                    subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                }),
+                perms,
+            };
+
+            let coll = db.collection::<ApiKey>("api_keys");
+            coll.insert_one(api_key, None).await.unwrap();
+
+            println!("{}", api_key_string);
+
+            std::process::exit(0);
+        }
+        None => {}
+    }
 
     let app = Router::new()
         .route("/models", post(create_model).get(list_models))
@@ -120,7 +283,17 @@ struct CreateModel {
     fields: Vec<ModelField>,
 }
 
-async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>) -> Json<Model> {
+async fn create_model(
+    State(db): State<Database>,
+    headers: HeaderMap,
+    Json(input): Json<CreateModel>,
+) -> Result<Json<Model>, StatusCode> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::AuthRequired.into()),
+        Err(err) => return Err(err.into()),
+    }
+
     // ensure all fields have unique names and slugs
     let mut seen_names = HashSet::new();
     let mut seen_slugs = HashSet::new();
@@ -224,29 +397,48 @@ async fn create_model(State(db): State<Database>, Json(input): Json<CreateModel>
     let coll = db.collection::<Model>("models");
     coll.insert_one(&model, None).await.unwrap();
 
-    Json(model)
+    Ok(Json(model))
 }
 
-async fn list_models(State(db): State<Database>) -> Json<Vec<Model>> {
+async fn list_models(
+    State(db): State<Database>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<Model>>, StatusCode> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::AuthRequired.into()),
+        Err(err) => return Err(err.into()),
+    }
+
     let coll = db.collection::<Model>("models");
-    Json(
+    Ok(Json(
         coll.find(doc! {}, None)
             .await
             .unwrap()
             .try_collect()
             .await
             .unwrap(),
-    )
+    ))
 }
 
-async fn list_model(State(db): State<Database>, Path(slug): Path<String>) -> Json<Model> {
+async fn list_model(
+    State(db): State<Database>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Model>, StatusCode> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::AuthRequired.into()),
+        Err(err) => return Err(err.into()),
+    }
+
     let coll = db.collection::<Model>("models");
-    Json(
+    Ok(Json(
         coll.find_one(doc! { "slug": slug }, None)
             .await
             .unwrap()
             .unwrap(),
-    )
+    ))
 }
 
 // TODO: update model
@@ -260,8 +452,15 @@ struct CreateEntry {
 async fn create_entry(
     State(db): State<Database>,
     Path(slug): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<CreateEntry>,
-) -> Json<Entry> {
+) -> Result<Json<Entry>, StatusCode> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::AuthRequired.into()),
+        Err(err) => return Err(err.into()),
+    }
+
     let coll = db.collection::<Model>("models");
     let model = coll
         .find_one(doc! { "slug": slug }, None)
@@ -413,7 +612,7 @@ async fn create_entry(
     let coll = db.collection::<Entry>("entries");
     coll.insert_one(&entry, None).await.unwrap();
 
-    Json(entry)
+    Ok(Json(entry))
 }
 
 #[derive(Deserialize, Debug)]
@@ -425,8 +624,15 @@ struct ListEntries {
 async fn list_entries(
     State(db): State<Database>,
     Path(slug): Path<String>,
+    headers: HeaderMap,
     query: Option<Query<ListEntries>>,
-) -> Json<Vec<Entry>> {
+) -> Result<Json<Vec<Entry>>, StatusCode> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::AuthRequired.into()),
+        Err(err) => return Err(err.into()),
+    }
+
     let coll = db.collection::<Model>("models");
     let model = coll
         .find_one(doc! { "slug": slug }, None)
@@ -487,7 +693,7 @@ async fn list_entries(
         .await
         .unwrap();
 
-    Json(entries)
+    Ok(Json(entries))
 }
 
 // TODO: update entries

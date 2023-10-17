@@ -1,6 +1,7 @@
 ### Create model
 POST http://localhost:3000/models
 content-type: application/json
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 {
     "name": "Blog Post",
@@ -71,13 +72,16 @@ content-type: application/json
 
 ### List models
 GET http://localhost:3000/models
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 ### Show model
 GET http://localhost:3000/models/blog_post
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 ### Create entry
 POST http://localhost:3000/models/blog_post/entries
 content-type: application/json
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 {
     "fields": {
@@ -107,12 +111,16 @@ content-type: application/json
 
 ### List entries
 GET http://localhost:3000/models/blog_post/entries
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 ### Get entry by id
 GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 ### Get serveral entries by id
 GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c,652c1a4153b4cca62488ada5
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
 
 ### Get entry by id with selection
 GET http://localhost:3000/models/blog_post/entries?id=652b7e272560d5ac842c424c&select=title,date,tags
+api-key: fi8PE9AZJ38tjbSeRJAhlnOsw7P0A0W8Dazaz1ommpoaq36z
