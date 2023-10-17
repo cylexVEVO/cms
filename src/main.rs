@@ -404,7 +404,7 @@ async fn list_models(
     State(db): State<Database>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Model>>, StatusCode> {
-    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
         Err(err) => return Err(err.into()),
@@ -426,7 +426,7 @@ async fn list_model(
     Path(slug): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Model>, StatusCode> {
-    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
         Err(err) => return Err(err.into()),
@@ -627,7 +627,7 @@ async fn list_entries(
     headers: HeaderMap,
     query: Option<Query<ListEntries>>,
 ) -> Result<Json<Vec<Entry>>, StatusCode> {
-    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
         Err(err) => return Err(err.into()),
