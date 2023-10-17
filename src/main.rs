@@ -71,13 +71,123 @@ enum Error {
     RingError,
     #[error("auth required")]
     AuthRequired,
+    #[error("duplicate field name")]
+    DuplicateFieldName,
+    #[error("duplicate field slug")]
+    DuplicateFieldSlug,
+    #[error("min_length must be less than max_length")]
+    InvalidLengthRange,
+    #[error("min must be less than max")]
+    InvalidValueRange,
+    #[error("invalid field value")]
+    InvalidFieldValue,
+    #[error("not_before must be before not_after")]
+    InvalidDateRange,
+    #[error("duplicate enum variant")]
+    DuplicateEnumVariant,
+    #[error("invalid field options")]
+    InvalidFieldOptions,
+    #[error("entry fields must match model fields")]
+    ModelEntryFieldsMismatch,
+    #[error("value is too short")]
+    ValueTooShort,
+    #[error("value is too long")]
+    ValueTooLong,
+    #[error("value is too small")]
+    ValueTooSmall,
+    #[error("value is too large")]
+    ValueTooLarge,
+    #[error("variant is not part of enum")]
+    UnknownEnumVariant,
+    #[error("too many selected variants")]
+    TooManyVariants,
+    #[error("date is before not_before")]
+    DateTooEarly,
+    #[error("date is after not_after")]
+    DateTooLate,
+    #[error("field not in model")]
+    UnknownField,
+    #[error("mongodb error")]
+    MongoError(#[from] mongodb::error::Error),
 }
 
-impl Into<StatusCode> for Error {
-    fn into(self) -> StatusCode {
+impl Into<(StatusCode, String)> for Error {
+    fn into(self) -> (StatusCode, String) {
         match self {
-            Self::AuthRequired => StatusCode::UNAUTHORIZED,
-            Self::IoError(_) | Self::RingError => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::IoError(_) | Self::RingError | Self::MongoError(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ),
+            Self::AuthRequired => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()),
+            Self::DuplicateFieldName => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "duplicate field name".into(),
+            ),
+            Self::DuplicateFieldSlug => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "duplicate field slug".into(),
+            ),
+            Self::InvalidLengthRange => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "min_length must be less than max_length".into(),
+            ),
+            Self::InvalidValueRange => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "min must be less than max".into(),
+            ),
+            Self::InvalidFieldValue => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid field value".into(),
+            ),
+            Self::InvalidDateRange => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "not_before must be before not_after".into(),
+            ),
+            Self::DuplicateEnumVariant => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "duplicate enum variant".into(),
+            ),
+            Self::InvalidFieldOptions => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid field options".into(),
+            ),
+            Self::ModelEntryFieldsMismatch => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "entry fields must match model fields".into(),
+            ),
+            Self::ValueTooShort => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "value is too short".into(),
+            ),
+            Self::ValueTooLong => (StatusCode::UNPROCESSABLE_ENTITY, "value is too long".into()),
+            Self::ValueTooSmall => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "value is too small".into(),
+            ),
+            Self::ValueTooLarge => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "value is too large".into(),
+            ),
+            Self::UnknownEnumVariant => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "variant is not part of enum".into(),
+            ),
+            Self::TooManyVariants => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "too many selected variants".into(),
+            ),
+            Self::DateTooEarly => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "date is before not_before".into(),
+            ),
+            Self::DateTooLate => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "date is after not_after".into(),
+            ),
+            Self::UnknownField => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "field not in model".into(),
+            ),
         }
     }
 }
@@ -114,8 +224,7 @@ async fn verify_api_key(
 ) -> Result<bool, Error> {
     let signed_key = hmac::sign(&get_signing_key()?, api_key.as_bytes());
     Ok(match coll.find_one(doc! { "key": Bson::Binary(Binary { bytes: signed_key.as_ref().to_vec(), subtype: mongodb::bson::spec::BinarySubtype::Generic }) }, None)
-        .await
-        .unwrap() {
+        .await? {
             Some(found_key) => {
                 required_perms.iter().all(|p| found_key.perms.contains(p))
             },
@@ -287,7 +396,7 @@ async fn create_model(
     State(db): State<Database>,
     headers: HeaderMap,
     Json(input): Json<CreateModel>,
-) -> Result<Json<Model>, StatusCode> {
+) -> Result<Json<Model>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
@@ -300,11 +409,11 @@ async fn create_model(
 
     for field in &input.fields {
         if seen_names.contains(&field.name) {
-            panic!("duplicate field name");
+            return Err(Error::DuplicateFieldName.into());
         }
 
         if seen_slugs.contains(&field.slug) {
-            panic!("duplicate field slug");
+            return Err(Error::DuplicateFieldSlug.into());
         }
 
         // validate field options
@@ -319,7 +428,7 @@ async fn create_model(
                 // make sure max length is not less than min, and vice versa
                 if let (Some(min_length), Some(max_length)) = (min_length, max_length) {
                     if min_length > max_length {
-                        panic!("min_length must be less than max_length");
+                        return Err(Error::InvalidLengthRange.into());
                     }
                 }
             }
@@ -327,7 +436,7 @@ async fn create_model(
                 // make sure max length is not less than min, and vice versa
                 if let (Some(min), Some(max)) = (min, max) {
                     if min > max {
-                        panic!("min must be less than max");
+                        return Err(Error::InvalidValueRange.into());
                     }
                 }
             }
@@ -342,14 +451,14 @@ async fn create_model(
                 if let Some(not_before) = not_before {
                     match DateTime::parse_from_rfc3339(&not_before) {
                         Ok(_) => {}
-                        Err(_) => panic!("invalid field value"),
+                        Err(_) => return Err(Error::InvalidFieldValue.into()),
                     }
                 }
 
                 if let Some(not_after) = not_after {
                     match DateTime::parse_from_rfc3339(&not_after) {
                         Ok(_) => {}
-                        Err(_) => panic!("invalid field value"),
+                        Err(_) => return Err(Error::InvalidFieldValue.into()),
                     }
                 }
 
@@ -360,7 +469,7 @@ async fn create_model(
                     );
 
                     if not_before > not_after {
-                        panic!("not_before must be before not_after");
+                        return Err(Error::InvalidDateRange.into());
                     }
                 }
             }
@@ -373,14 +482,14 @@ async fn create_model(
 
                 for variant in variants {
                     if seen_variants.contains(variant) {
-                        panic!("duplicate enum variant");
+                        return Err(Error::DuplicateEnumVariant.into());
                     }
 
                     seen_variants.insert(variant);
                 }
             }
             (None, _) => {}
-            _ => panic!("invalid field options"),
+            _ => return Err(Error::InvalidFieldOptions.into()),
         }
 
         seen_names.insert(&field.name);
@@ -403,7 +512,7 @@ async fn create_model(
 async fn list_models(
     State(db): State<Database>,
     headers: HeaderMap,
-) -> Result<Json<Vec<Model>>, StatusCode> {
+) -> Result<Json<Vec<Model>>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
@@ -425,7 +534,7 @@ async fn list_model(
     State(db): State<Database>,
     Path(slug): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<Model>, StatusCode> {
+) -> Result<Json<Model>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
@@ -454,7 +563,7 @@ async fn create_entry(
     Path(slug): Path<String>,
     headers: HeaderMap,
     Json(input): Json<CreateEntry>,
-) -> Result<Json<Entry>, StatusCode> {
+) -> Result<Json<Entry>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
@@ -478,7 +587,7 @@ async fn create_entry(
     entry_fields.sort();
 
     if model_fields != entry_fields {
-        panic!("entry fields must match model fields");
+        return Err(Error::ModelEntryFieldsMismatch.into());
     }
 
     for (name, value) in input.fields {
@@ -496,36 +605,36 @@ async fn create_entry(
                     }) => {
                         if let Some(min_length) = min_length {
                             if &(text.len() as u64) < min_length {
-                                panic!("value is too short");
+                                return Err(Error::ValueTooShort.into());
                             }
                         }
 
                         if let Some(max_length) = max_length {
                             if &(text.len() as u64) > max_length {
-                                panic!("value is too long");
+                                return Err(Error::ValueTooLong.into());
                             }
                         }
                     }
                     None => {}
-                    _ => panic!("invalid field options"),
+                    _ => return Err(Error::InvalidFieldOptions.into()),
                 }
             }
             (EntryField::Number(value), ModelFieldType::Number) => match &model_field.options {
                 Some(ModelFieldOptions::Number { min, max }) => {
                     if let Some(min) = min {
                         if value < min {
-                            panic!("value is too small");
+                            return Err(Error::ValueTooSmall.into());
                         }
                     }
 
                     if let Some(max) = max {
                         if value > max {
-                            panic!("value is too large");
+                            return Err(Error::ValueTooLarge.into());
                         }
                     }
                 }
                 None => {}
-                _ => panic!("invalid field options"),
+                _ => return Err(Error::InvalidFieldOptions.into()),
             },
             (EntryField::DateTime(date), ModelFieldType::DateTime) => {
                 // ensure date is valid
@@ -541,7 +650,7 @@ async fn create_entry(
                                         DateTime::parse_from_rfc3339(&not_before).unwrap();
 
                                     if date < not_before {
-                                        panic!("date is before not_before");
+                                        return Err(Error::DateTooEarly.into());
                                     }
                                 }
 
@@ -550,17 +659,17 @@ async fn create_entry(
                                         DateTime::parse_from_rfc3339(&not_after).unwrap();
 
                                     if date > not_after {
-                                        panic!("date is after not_after");
+                                        return Err(Error::DateTooLate.into());
                                     }
                                 }
                             }
                             None => {}
-                            _ => panic!("invalid field options"),
+                            _ => return Err(Error::InvalidFieldOptions.into()),
                         }
 
                         value = EntryField::DateTime(date.to_rfc3339())
                     }
-                    Err(_) => panic!("invalid field value"),
+                    Err(_) => return Err(Error::InvalidFieldValue.into()),
                 }
             }
             (EntryField::Boolean(_), ModelFieldType::Boolean) => {}
@@ -569,21 +678,21 @@ async fn create_entry(
                 match &model_field.options {
                     Some(ModelFieldOptions::Enum { allow_multiple }) => {
                         if !allow_multiple.unwrap_or(false) && selected_variants.len() > 1 {
-                            panic!("too many selected variants");
+                            return Err(Error::TooManyVariants.into());
                         }
                     }
                     None => {
                         // no `options` on an enum is the same as `allow_multiple` being `false`
                         if selected_variants.len() > 1 {
-                            panic!("too many selected variants");
+                            return Err(Error::TooManyVariants.into());
                         }
                     }
-                    _ => panic!("invalid field options"),
+                    _ => return Err(Error::InvalidFieldOptions.into()),
                 }
 
                 // ensure specified variants are part of enum
                 if !selected_variants.iter().all(|f| enum_variants.contains(f)) {
-                    panic!("invalid field value");
+                    return Err(Error::UnknownEnumVariant.into());
                 }
 
                 // ensure all selected variants are unique
@@ -591,13 +700,13 @@ async fn create_entry(
 
                 for variant in selected_variants {
                     if seen_variants.contains(variant) {
-                        panic!("duplicate enum variant");
+                        return Err(Error::DuplicateEnumVariant.into());
                     }
 
                     seen_variants.insert(variant);
                 }
             }
-            _ => panic!("invalid field value"),
+            _ => return Err(Error::InvalidFieldValue.into()),
         }
 
         fields.insert(name, value);
@@ -626,7 +735,7 @@ async fn list_entries(
     Path(slug): Path<String>,
     headers: HeaderMap,
     query: Option<Query<ListEntries>>,
-) -> Result<Json<Vec<Entry>>, StatusCode> {
+) -> Result<Json<Vec<Entry>>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
         Ok(false) => return Err(Error::AuthRequired.into()),
@@ -667,14 +776,14 @@ async fn list_entries(
             let mut projection = Document::new();
 
             if let Some(select) = &query.select {
-                select.split(',').for_each(|field| {
+                for field in select.split(',') {
                     // make sure field is in model
                     if model.fields.iter().find(|f| f.slug == field).is_none() {
-                        panic!("field not in model");
+                        return Err(Error::UnknownField.into());
                     }
 
                     projection.insert(format!("fields.{}", field), 1);
-                });
+                }
 
                 projection.insert("model_id", 1);
             }
