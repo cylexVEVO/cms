@@ -107,14 +107,18 @@ enum Error {
     DateTooLate,
     #[error("field not in model")]
     UnknownField,
-    #[error("mongodb error")]
+    #[error("unknown error")]
     MongoError(#[from] mongodb::error::Error),
+    #[error("unknown error")]
+    ToStrError(#[from] axum::http::header::ToStrError),
+    #[error("unknown error")]
+    UnknownError,
 }
 
 impl Into<(StatusCode, String)> for Error {
     fn into(self) -> (StatusCode, String) {
         match self {
-            Self::IoError(_) | Self::RingError | Self::MongoError(_) => (
+            Self::IoError(_) | Self::RingError | Self::MongoError(_) | Self::ToStrError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             ),
@@ -188,7 +192,24 @@ impl Into<(StatusCode, String)> for Error {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "field not in model".into(),
             ),
+            Self::UnknownError => (StatusCode::UNPROCESSABLE_ENTITY, "unknown error".into()),
         }
+    }
+}
+
+impl<T> Into<Result<T, (StatusCode, String)>> for Error {
+    fn into(self) -> Result<T, (StatusCode, String)> {
+        return Err(self.into());
+    }
+}
+
+// convert foreign results into our result type
+// i didn't feel like figuring out the weird type stuff
+// to just implement From<>
+fn frtor<T, U>(parse_error: Result<T, U>) -> Result<T, (StatusCode, String)> {
+    match parse_error {
+        Ok(data) => return Ok(data),
+        Err(_) => Error::UnknownError.into(),
     }
 }
 
@@ -240,12 +261,7 @@ async fn verify_api_key_header(
     Ok(match headers.get("api-key") {
         Some(api_key) => {
             let coll = db.collection::<ApiKey>("api_keys");
-            verify_api_key(
-                &coll,
-                required_perms,
-                &api_key.to_str().unwrap().to_string(),
-            )
-            .await?
+            verify_api_key(&coll, required_perms, &api_key.to_str()?.to_string()).await?
         }
         None => false,
     })
@@ -253,10 +269,13 @@ async fn verify_api_key_header(
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().unwrap();
-    let client = Client::with_uri_str(std::env::var("DATABASE_URL").unwrap())
-        .await
-        .unwrap();
+    dotenvy::dotenv().expect("failed to get env vars");
+
+    let client = Client::with_uri_str(
+        std::env::var("DATABASE_URL").expect("failed to get DATABASE_URL env var"),
+    )
+    .await
+    .expect("db connection failed");
     let db = client.database("cms");
     db.collection::<Model>("models")
         .create_index(
@@ -269,7 +288,8 @@ async fn main() {
             None,
         )
         .await
-        .unwrap();
+        .expect("failed to create model slug idx");
+
     db.collection::<Model>("api_keys")
         .create_index(
             IndexModel::builder()
@@ -280,7 +300,7 @@ async fn main() {
             None,
         )
         .await
-        .unwrap();
+        .expect("failed to create api_keys key idx");
 
     let args = Args::parse();
 
@@ -300,7 +320,9 @@ async fn main() {
             };
 
             let coll = db.collection::<ApiKey>("api_keys");
-            coll.insert_one(api_key, None).await.unwrap();
+            coll.insert_one(api_key, None)
+                .await
+                .expect("failed to create api key");
 
             println!("{}", api_key_string);
 
@@ -322,7 +344,7 @@ async fn main() {
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
-        .unwrap();
+        .expect("failed to bind server");
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -399,8 +421,8 @@ async fn create_model(
 ) -> Result<Json<Model>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
         Ok(true) => {}
-        Ok(false) => return Err(Error::AuthRequired.into()),
-        Err(err) => return Err(err.into()),
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
     }
 
     // ensure all fields have unique names and slugs
@@ -409,11 +431,11 @@ async fn create_model(
 
     for field in &input.fields {
         if seen_names.contains(&field.name) {
-            return Err(Error::DuplicateFieldName.into());
+            return Error::DuplicateFieldName.into();
         }
 
         if seen_slugs.contains(&field.slug) {
-            return Err(Error::DuplicateFieldSlug.into());
+            return Error::DuplicateFieldSlug.into();
         }
 
         // validate field options
@@ -428,7 +450,7 @@ async fn create_model(
                 // make sure max length is not less than min, and vice versa
                 if let (Some(min_length), Some(max_length)) = (min_length, max_length) {
                     if min_length > max_length {
-                        return Err(Error::InvalidLengthRange.into());
+                        return Error::InvalidLengthRange.into();
                     }
                 }
             }
@@ -436,7 +458,7 @@ async fn create_model(
                 // make sure max length is not less than min, and vice versa
                 if let (Some(min), Some(max)) = (min, max) {
                     if min > max {
-                        return Err(Error::InvalidValueRange.into());
+                        return Error::InvalidValueRange.into();
                     }
                 }
             }
@@ -451,25 +473,25 @@ async fn create_model(
                 if let Some(not_before) = not_before {
                     match DateTime::parse_from_rfc3339(&not_before) {
                         Ok(_) => {}
-                        Err(_) => return Err(Error::InvalidFieldValue.into()),
+                        Err(_) => return Error::InvalidFieldValue.into(),
                     }
                 }
 
                 if let Some(not_after) = not_after {
                     match DateTime::parse_from_rfc3339(&not_after) {
                         Ok(_) => {}
-                        Err(_) => return Err(Error::InvalidFieldValue.into()),
+                        Err(_) => return Error::InvalidFieldValue.into(),
                     }
                 }
 
                 if let (Some(not_before), Some(not_after)) = (not_before, not_after) {
                     let (not_before, not_after) = (
-                        DateTime::parse_from_rfc3339(&not_before).unwrap(),
-                        DateTime::parse_from_rfc3339(&not_after).unwrap(),
+                        frtor(DateTime::parse_from_rfc3339(&not_before))?,
+                        frtor(DateTime::parse_from_rfc3339(&not_after))?,
                     );
 
                     if not_before > not_after {
-                        return Err(Error::InvalidDateRange.into());
+                        return Error::InvalidDateRange.into();
                     }
                 }
             }
@@ -482,14 +504,14 @@ async fn create_model(
 
                 for variant in variants {
                     if seen_variants.contains(variant) {
-                        return Err(Error::DuplicateEnumVariant.into());
+                        return Error::DuplicateEnumVariant.into();
                     }
 
                     seen_variants.insert(variant);
                 }
             }
             (None, _) => {}
-            _ => return Err(Error::InvalidFieldOptions.into()),
+            _ => return Error::InvalidFieldOptions.into(),
         }
 
         seen_names.insert(&field.name);
@@ -504,7 +526,7 @@ async fn create_model(
     };
 
     let coll = db.collection::<Model>("models");
-    coll.insert_one(&model, None).await.unwrap();
+    frtor(coll.insert_one(&model, None).await)?;
 
     Ok(Json(model))
 }
@@ -515,39 +537,32 @@ async fn list_models(
 ) -> Result<Json<Vec<Model>>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
-        Ok(false) => return Err(Error::AuthRequired.into()),
-        Err(err) => return Err(err.into()),
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
     }
 
     let coll = db.collection::<Model>("models");
-    Ok(Json(
-        coll.find(doc! {}, None)
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap(),
-    ))
+
+    Ok(Json(frtor(
+        frtor(coll.find(doc! {}, None).await)?.try_collect().await,
+    )?))
 }
 
 async fn list_model(
     State(db): State<Database>,
     Path(slug): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<Model>, (StatusCode, String)> {
+) -> Result<Json<Option<Model>>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
-        Ok(false) => return Err(Error::AuthRequired.into()),
-        Err(err) => return Err(err.into()),
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
     }
 
     let coll = db.collection::<Model>("models");
-    Ok(Json(
-        coll.find_one(doc! { "slug": slug }, None)
-            .await
-            .unwrap()
-            .unwrap(),
-    ))
+    Ok(Json(frtor(
+        coll.find_one(doc! { "slug": slug }, None).await,
+    )?))
 }
 
 // TODO: update model
@@ -563,19 +578,19 @@ async fn create_entry(
     Path(slug): Path<String>,
     headers: HeaderMap,
     Json(input): Json<CreateEntry>,
-) -> Result<Json<Entry>, (StatusCode, String)> {
+) -> Result<Json<Option<Entry>>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Create]).await {
         Ok(true) => {}
-        Ok(false) => return Err(Error::AuthRequired.into()),
-        Err(err) => return Err(err.into()),
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
     }
 
     let coll = db.collection::<Model>("models");
-    let model = coll
-        .find_one(doc! { "slug": slug }, None)
-        .await
-        .unwrap()
-        .unwrap();
+    let model = if let Some(model) = frtor(coll.find_one(doc! { "slug": slug }, None).await)? {
+        model
+    } else {
+        return Ok(Json(None));
+    };
 
     let mut fields = HashMap::new();
 
@@ -587,11 +602,15 @@ async fn create_entry(
     entry_fields.sort();
 
     if model_fields != entry_fields {
-        return Err(Error::ModelEntryFieldsMismatch.into());
+        return Error::ModelEntryFieldsMismatch.into();
     }
 
     for (name, value) in input.fields {
-        let model_field = model.fields.iter().find(|f| f.slug == name).unwrap();
+        let model_field = if let Some(model_field) = model.fields.iter().find(|f| f.slug == name) {
+            model_field
+        } else {
+            return Error::UnknownField.into();
+        };
         let mut value = value;
 
         // ensure field kind matches definition
@@ -605,36 +624,36 @@ async fn create_entry(
                     }) => {
                         if let Some(min_length) = min_length {
                             if &(text.len() as u64) < min_length {
-                                return Err(Error::ValueTooShort.into());
+                                return Error::ValueTooShort.into();
                             }
                         }
 
                         if let Some(max_length) = max_length {
                             if &(text.len() as u64) > max_length {
-                                return Err(Error::ValueTooLong.into());
+                                return Error::ValueTooLong.into();
                             }
                         }
                     }
                     None => {}
-                    _ => return Err(Error::InvalidFieldOptions.into()),
+                    _ => return Error::InvalidFieldOptions.into(),
                 }
             }
             (EntryField::Number(value), ModelFieldType::Number) => match &model_field.options {
                 Some(ModelFieldOptions::Number { min, max }) => {
                     if let Some(min) = min {
                         if value < min {
-                            return Err(Error::ValueTooSmall.into());
+                            return Error::ValueTooSmall.into();
                         }
                     }
 
                     if let Some(max) = max {
                         if value > max {
-                            return Err(Error::ValueTooLarge.into());
+                            return Error::ValueTooLarge.into();
                         }
                     }
                 }
                 None => {}
-                _ => return Err(Error::InvalidFieldOptions.into()),
+                _ => return Error::InvalidFieldOptions.into(),
             },
             (EntryField::DateTime(date), ModelFieldType::DateTime) => {
                 // ensure date is valid
@@ -647,29 +666,29 @@ async fn create_entry(
                             }) => {
                                 if let Some(not_before) = not_before {
                                     let not_before =
-                                        DateTime::parse_from_rfc3339(&not_before).unwrap();
+                                        frtor(DateTime::parse_from_rfc3339(&not_before))?;
 
                                     if date < not_before {
-                                        return Err(Error::DateTooEarly.into());
+                                        return Error::DateTooEarly.into();
                                     }
                                 }
 
                                 if let Some(not_after) = not_after {
                                     let not_after =
-                                        DateTime::parse_from_rfc3339(&not_after).unwrap();
+                                        frtor(DateTime::parse_from_rfc3339(&not_after))?;
 
                                     if date > not_after {
-                                        return Err(Error::DateTooLate.into());
+                                        return Error::DateTooLate.into();
                                     }
                                 }
                             }
                             None => {}
-                            _ => return Err(Error::InvalidFieldOptions.into()),
+                            _ => return Error::InvalidFieldOptions.into(),
                         }
 
                         value = EntryField::DateTime(date.to_rfc3339())
                     }
-                    Err(_) => return Err(Error::InvalidFieldValue.into()),
+                    Err(_) => return Error::InvalidFieldValue.into(),
                 }
             }
             (EntryField::Boolean(_), ModelFieldType::Boolean) => {}
@@ -678,21 +697,21 @@ async fn create_entry(
                 match &model_field.options {
                     Some(ModelFieldOptions::Enum { allow_multiple }) => {
                         if !allow_multiple.unwrap_or(false) && selected_variants.len() > 1 {
-                            return Err(Error::TooManyVariants.into());
+                            return Error::TooManyVariants.into();
                         }
                     }
                     None => {
                         // no `options` on an enum is the same as `allow_multiple` being `false`
                         if selected_variants.len() > 1 {
-                            return Err(Error::TooManyVariants.into());
+                            return Error::TooManyVariants.into();
                         }
                     }
-                    _ => return Err(Error::InvalidFieldOptions.into()),
+                    _ => return Error::InvalidFieldOptions.into(),
                 }
 
                 // ensure specified variants are part of enum
                 if !selected_variants.iter().all(|f| enum_variants.contains(f)) {
-                    return Err(Error::UnknownEnumVariant.into());
+                    return Error::UnknownEnumVariant.into();
                 }
 
                 // ensure all selected variants are unique
@@ -700,13 +719,13 @@ async fn create_entry(
 
                 for variant in selected_variants {
                     if seen_variants.contains(variant) {
-                        return Err(Error::DuplicateEnumVariant.into());
+                        return Error::DuplicateEnumVariant.into();
                     }
 
                     seen_variants.insert(variant);
                 }
             }
-            _ => return Err(Error::InvalidFieldValue.into()),
+            _ => return Error::InvalidFieldValue.into(),
         }
 
         fields.insert(name, value);
@@ -719,9 +738,9 @@ async fn create_entry(
     };
 
     let coll = db.collection::<Entry>("entries");
-    coll.insert_one(&entry, None).await.unwrap();
+    frtor(coll.insert_one(&entry, None).await)?;
 
-    Ok(Json(entry))
+    Ok(Json(Some(entry)))
 }
 
 #[derive(Deserialize, Debug)]
@@ -738,16 +757,16 @@ async fn list_entries(
 ) -> Result<Json<Vec<Entry>>, (StatusCode, String)> {
     match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Read]).await {
         Ok(true) => {}
-        Ok(false) => return Err(Error::AuthRequired.into()),
-        Err(err) => return Err(err.into()),
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
     }
 
     let coll = db.collection::<Model>("models");
-    let model = coll
-        .find_one(doc! { "slug": slug }, None)
-        .await
-        .unwrap()
-        .unwrap();
+    let model = if let Some(models) = frtor(coll.find_one(doc! { "slug": slug }, None).await)? {
+        models
+    } else {
+        return Ok(Json(vec![]));
+    };
 
     let filter = match &query {
         Some(query) => {
@@ -756,7 +775,7 @@ async fn list_entries(
             if let Some(id) = &query.id {
                 let ids: Vec<ObjectId> = id
                     .split(',')
-                    .map(|id| ObjectId::parse_str(id).unwrap())
+                    .map(|id| frtor(ObjectId::parse_str(id)).unwrap())
                     .collect();
 
                 filter.insert("_id", doc! { "$in": ids });
@@ -779,7 +798,7 @@ async fn list_entries(
                 for field in select.split(',') {
                     // make sure field is in model
                     if model.fields.iter().find(|f| f.slug == field).is_none() {
-                        return Err(Error::UnknownField.into());
+                        return Error::UnknownField.into();
                     }
 
                     projection.insert(format!("fields.{}", field), 1);
@@ -794,13 +813,7 @@ async fn list_entries(
     };
 
     let coll = db.collection::<Entry>("entries");
-    let entries = coll
-        .find(filter, options)
-        .await
-        .unwrap()
-        .try_collect()
-        .await
-        .unwrap();
+    let entries = frtor(frtor(coll.find(filter, options).await)?.try_collect().await)?;
 
     Ok(Json(entries))
 }
