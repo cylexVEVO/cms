@@ -23,6 +23,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     net::SocketAddr,
+    process,
 };
 use thiserror::Error;
 
@@ -37,6 +38,12 @@ enum Command {
     GenerateApiKey {
         #[arg(short, long)]
         perms: Vec<ApiKeyPermission>,
+    },
+    RevokeApiKey {
+        #[arg()]
+        key: Option<String>,
+        #[arg(short, long, default_value_t = false)]
+        all: bool,
     },
 }
 
@@ -326,7 +333,41 @@ async fn main() {
 
             println!("{}", api_key_string);
 
-            std::process::exit(0);
+            process::exit(0);
+        }
+        Some(Command::RevokeApiKey { key: api_key, all }) => {
+            let coll = db.collection::<ApiKey>("api_keys");
+
+            if all {
+                coll.delete_many(doc! {}, None)
+                    .await
+                    .expect("failed to revoke all api keys");
+
+                println!("all api keys have been revoked");
+
+                process::exit(0);
+            }
+
+            let api_key = if let Some(api_key) = api_key {
+                api_key
+            } else {
+                eprintln!("an api key must be provided when not using `--all`");
+
+                process::exit(1);
+            };
+
+            let key = get_signing_key().expect("failed to get signing key");
+            let signed_key = hmac::sign(&key, api_key.as_bytes());
+
+            coll.delete_one(doc! {
+                "key": Bson::Binary(Binary { bytes: signed_key.as_ref().to_vec(), subtype: mongodb::bson::spec::BinarySubtype::Generic })
+            }, None)
+                .await
+                .expect("failed to revoke api key");
+
+            println!("the api key has been revoked");
+
+            process::exit(0);
         }
         None => {}
     }
