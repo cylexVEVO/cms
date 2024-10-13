@@ -8,6 +8,7 @@ use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use futures::TryStreamExt;
 use mongodb::{
+    action::Action,
     bson::{doc, oid::ObjectId, Binary, Bson, Document},
     options::{FindOptions, IndexOptions},
     Client, Collection, Database, IndexModel,
@@ -251,7 +252,7 @@ async fn verify_api_key(
     api_key: &String,
 ) -> Result<bool, Error> {
     let signed_key = hmac::sign(&get_signing_key()?, api_key.as_bytes());
-    Ok(match coll.find_one(doc! { "key": Bson::Binary(Binary { bytes: signed_key.as_ref().to_vec(), subtype: mongodb::bson::spec::BinarySubtype::Generic }) }, None)
+    Ok(match coll.find_one(doc! { "key": Bson::Binary(Binary { bytes: signed_key.as_ref().to_vec(), subtype: mongodb::bson::spec::BinarySubtype::Generic }) })
         .await? {
             Some(found_key) => {
                 required_perms.iter().all(|p| found_key.perms.contains(p))
@@ -292,7 +293,6 @@ async fn main() {
                 })
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
-            None,
         )
         .await
         .expect("failed to create model slug idx");
@@ -304,7 +304,6 @@ async fn main() {
                     "key": 1
                 })
                 .build(),
-            None,
         )
         .await
         .expect("failed to create api_keys key idx");
@@ -327,7 +326,7 @@ async fn main() {
             };
 
             let coll = db.collection::<ApiKey>("api_keys");
-            coll.insert_one(api_key, None)
+            coll.insert_one(api_key)
                 .await
                 .expect("failed to create api key");
 
@@ -339,7 +338,7 @@ async fn main() {
             let coll = db.collection::<ApiKey>("api_keys");
 
             if all {
-                coll.delete_many(doc! {}, None)
+                coll.delete_many(doc! {})
                     .await
                     .expect("failed to revoke all api keys");
 
@@ -361,7 +360,7 @@ async fn main() {
 
             coll.delete_one(doc! {
                 "key": Bson::Binary(Binary { bytes: signed_key.as_ref().to_vec(), subtype: mongodb::bson::spec::BinarySubtype::Generic })
-            }, None)
+            })
                 .await
                 .expect("failed to revoke api key");
 
@@ -567,7 +566,7 @@ async fn create_model(
     };
 
     let coll = db.collection::<Model>("models");
-    frtor(coll.insert_one(&model, None).await)?;
+    frtor(coll.insert_one(&model).await)?;
 
     Ok(Json(model))
 }
@@ -585,7 +584,7 @@ async fn list_models(
     let coll = db.collection::<Model>("models");
 
     Ok(Json(frtor(
-        frtor(coll.find(doc! {}, None).await)?.try_collect().await,
+        frtor(coll.find(doc! {}).await)?.try_collect().await,
     )?))
 }
 
@@ -601,9 +600,7 @@ async fn list_model(
     }
 
     let coll = db.collection::<Model>("models");
-    Ok(Json(frtor(
-        coll.find_one(doc! { "slug": slug }, None).await,
-    )?))
+    Ok(Json(frtor(coll.find_one(doc! { "slug": slug }).await)?))
 }
 
 // TODO: update model
@@ -627,7 +624,7 @@ async fn create_entry(
     }
 
     let coll = db.collection::<Model>("models");
-    let model = if let Some(model) = frtor(coll.find_one(doc! { "slug": slug }, None).await)? {
+    let model = if let Some(model) = frtor(coll.find_one(doc! { "slug": slug }).await)? {
         model
     } else {
         return Ok(Json(None));
@@ -779,7 +776,7 @@ async fn create_entry(
     };
 
     let coll = db.collection::<Entry>("entries");
-    frtor(coll.insert_one(&entry, None).await)?;
+    frtor(coll.insert_one(&entry).await)?;
 
     Ok(Json(Some(entry)))
 }
@@ -803,7 +800,7 @@ async fn list_entries(
     }
 
     let coll = db.collection::<Model>("models");
-    let model = if let Some(models) = frtor(coll.find_one(doc! { "slug": slug }, None).await)? {
+    let model = if let Some(models) = frtor(coll.find_one(doc! { "slug": slug }).await)? {
         models
     } else {
         return Ok(Json(vec![]));
@@ -831,7 +828,7 @@ async fn list_entries(
         }
     };
 
-    let options = match &query {
+    let projection = match &query {
         Some(query) => {
             let mut projection = Document::new();
 
@@ -848,13 +845,23 @@ async fn list_entries(
                 projection.insert("model_id", 1);
             }
 
-            Some(FindOptions::builder().projection(projection).build())
+            Some(projection)
         }
         None => None,
     };
 
     let coll = db.collection::<Entry>("entries");
-    let entries = frtor(frtor(coll.find(filter, options).await)?.try_collect().await)?;
+    let entries = frtor(
+        frtor(
+            coll.find(filter)
+                .optional(projection, |filter, projection| {
+                    filter.projection(projection)
+                })
+                .await,
+        )?
+        .try_collect()
+        .await,
+    )?;
 
     Ok(Json(entries))
 }
