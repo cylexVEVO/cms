@@ -52,6 +52,7 @@ enum Command {
 enum ApiKeyPermission {
     Create,
     Read,
+    Delete,
 }
 
 impl From<String> for ApiKeyPermission {
@@ -59,6 +60,7 @@ impl From<String> for ApiKeyPermission {
         match value.as_str() {
             "create" => Self::Create,
             "read" => Self::Read,
+            "delete" => Self::Delete,
             _ => panic!("invalid permission"),
         }
     }
@@ -266,7 +268,7 @@ async fn verify_api_key_header(
     headers: &HeaderMap,
     required_perms: Vec<ApiKeyPermission>,
 ) -> Result<bool, Error> {
-    Ok(match headers.get("api-key") {
+    Ok(match headers.get("x-api-key") {
         Some(api_key) => {
             let coll = db.collection::<ApiKey>("api_keys");
             verify_api_key(&coll, required_perms, &api_key.to_str()?.to_string()).await?
@@ -373,10 +375,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/models", post(create_model).get(list_models))
-        .route("/models/:slug", get(list_model))
+        .route("/models/:slug", get(list_model).delete(delete_model))
         .route(
             "/models/:slug/entries",
-            post(create_entry).get(list_entries),
+            post(create_entry).get(list_entries).delete(delete_entries),
         )
         .with_state(db);
 
@@ -604,7 +606,63 @@ async fn list_model(
 }
 
 // TODO: update model
-// TODO: delete model
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DeleteModel {
+    // delete all of a model's entries
+    force: Option<bool>,
+}
+
+async fn delete_model(
+    State(db): State<Database>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(options): Json<DeleteModel>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Delete]).await {
+        Ok(true) => {}
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
+    }
+
+    let models_coll = db.collection::<Model>("models");
+    let entries_coll = db.collection::<Entry>("entries");
+    // TODO: error handle
+    let model = models_coll
+        .find_one(doc! { "slug": slug })
+        .await
+        .unwrap()
+        .unwrap();
+    let entries_exist = entries_coll
+        .count_documents(doc! { "model_id": model._id })
+        .await
+        .unwrap()
+        > 0;
+    let force_delete = options.force.unwrap_or(false);
+
+    if entries_exist && !force_delete {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            String::from(
+                "entries exist that use this model. delete the entries or specify `force: true`",
+            ),
+        ));
+    }
+
+    if force_delete {
+        entries_coll
+            .delete_many(doc! { "model_id": model._id })
+            .await
+            .unwrap();
+    }
+
+    models_coll
+        .delete_one(doc! { "_id": model._id })
+        .await
+        .unwrap();
+
+    Ok(StatusCode::OK)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct CreateEntry {
@@ -868,3 +926,49 @@ async fn list_entries(
 
 // TODO: update entries
 // TODO: delete entries
+
+#[derive(Deserialize, Debug)]
+struct DeleteEntries {
+    id: Option<String>,
+}
+
+async fn delete_entries(
+    State(db): State<Database>,
+    headers: HeaderMap,
+    query: Option<Query<DeleteEntries>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match verify_api_key_header(&db, &headers, vec![ApiKeyPermission::Delete]).await {
+        Ok(true) => {}
+        Ok(false) => return Error::AuthRequired.into(),
+        Err(err) => return err.into(),
+    }
+
+    let coll = db.collection::<Entry>("entries");
+
+    let filter = match &query {
+        Some(query) => {
+            let mut filter = Document::new();
+
+            if let Some(id) = &query.id {
+                let ids: Vec<ObjectId> = id
+                    .split(',')
+                    .map(|id| frtor(ObjectId::parse_str(id)).unwrap())
+                    .collect();
+
+                filter.insert("_id", doc! { "$in": ids });
+            }
+
+            filter
+        }
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                String::from("must specify entry IDs to delete"),
+            ));
+        }
+    };
+
+    coll.delete_many(filter).await.unwrap();
+
+    Ok(StatusCode::OK)
+}
